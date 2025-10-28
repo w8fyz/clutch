@@ -10,7 +10,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - app-network
+      - clutch-app-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U prod -d freshperf-web"]
       interval: 10s
@@ -21,7 +21,7 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile
-    container_name: freshperf-web-api
+    container_name: clutch-api
     restart: unless-stopped
     environment:
       DOCKER_RUNNING: true
@@ -42,13 +42,13 @@ services:
       db:
         condition: service_healthy
     networks:
-      - app-network
+      - clutch-app-network
 
   front:
     build:
       context: ./front
       dockerfile: Dockerfile
-    container_name: freshperf-web-front
+    container_name: clutch-front
     restart: unless-stopped
     environment:
       NODE_ENV: production
@@ -63,4 +63,4 @@ volumes:
   postgres_data:
 
 networks:
-  app-network:
+  clutch-app-network:
