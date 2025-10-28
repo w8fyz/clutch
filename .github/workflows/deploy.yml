@@ -1,0 +1,186 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: registry.freshperf.fr
+  API_IMAGE_NAME: clutch-api
+  FRONT_IMAGE_NAME: clutch-front
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      front: ${{ steps.filter.outputs.front }}
+      docker-compose: ${{ steps.filter.outputs.docker-compose }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for file changes
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            api:
+              - 'api/**'
+            front:
+              - 'front/**'
+            docker-compose:
+              - 'docker-compose.yml'
+              - '.env'
+
+  build-api:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to custom registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Extract metadata for API
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.API_IMAGE_NAME }}
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api
+          file: ./api/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.API_IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.API_IMAGE_NAME }}:buildcache,mode=max
+
+  # Build and push Frontend image
+  build-front:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.front == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to custom registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Extract metadata for Frontend
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.FRONT_IMAGE_NAME }}
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./front
+          file: ./front/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          secrets: |
+            "nextjs_env=PRODUCTION"
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.FRONT_IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.FRONT_IMAGE_NAME }}:buildcache,mode=max
+
+  # Deploy to server
+  deploy:
+    needs: [detect-changes, build-api, build-front]
+    if: |
+      always() && 
+      (needs.build-api.result == 'success' || needs.build-api.result == 'skipped') &&
+      (needs.build-front.result == 'success' || needs.build-front.result == 'skipped') &&
+      (needs.detect-changes.outputs.api == 'true' || needs.detect-changes.outputs.front == 'true' || needs.detect-changes.outputs.docker-compose == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DEPLOY_API: ${{ needs.detect-changes.outputs.api }}
+          DEPLOY_FRONT: ${{ needs.detect-changes.outputs.front }}
+          DEPLOY_COMPOSE: ${{ needs.detect-changes.outputs.docker-compose }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          envs: DEPLOY_API,DEPLOY_FRONT,DEPLOY_COMPOSE
+          script: |
+            cd /home/clutch
+            
+            echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login ${{ env.REGISTRY }} -u ${{ secrets.REGISTRY_USERNAME }} --password-stdin
+            
+            SERVICES=""
+            
+            # Ensure the database (db) service is running
+            echo "Checking if 'db' service is running..."
+            if ! docker compose ps --status running | grep -q "db"; then
+              echo "'db' is not running, starting it..."
+              docker compose up -d db
+            else
+              echo "'db' is already running."
+            fi
+            
+            if [ "$DEPLOY_API" = "true" ]; then
+              echo "Pulling API image..."
+              docker pull ${{ env.REGISTRY }}/${{ env.API_IMAGE_NAME }}:latest
+              SERVICES="$SERVICES api"
+            fi
+            
+            if [ "$DEPLOY_FRONT" = "true" ]; then
+              echo "Pulling Frontend image..."
+              docker pull ${{ env.REGISTRY }}/${{ env.FRONT_IMAGE_NAME }}:latest
+              SERVICES="$SERVICES front"
+            fi
+            
+            if [ "$DEPLOY_COMPOSE" = "true" ]; then
+              echo "Pulling latest docker-compose configuration..."
+              git pull origin main  # or your branch name
+            fi
+            
+            if [ -n "$SERVICES" ]; then
+              echo "Restarting services: $SERVICES"
+              docker compose up -d --no-deps $SERVICES
+              
+              sleep 5
+              
+              docker compose ps $SERVICES
+            else
+              echo "No services to restart"
+            fi
+            
+            # Clean up unused images
+            docker image prune -af

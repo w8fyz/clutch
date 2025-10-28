@@ -1,0 +1,38 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'fr.freshperf'
+version = 'indev-0.0.1'
+
+repositories {
+    mavenCentral()
+}
+
+application {
+    mainClass = 'fr.freshperf.api.Main'
+}
+
+dependencies {
+    implementation 'org.postgresql:postgresql:42.7.3'
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+}
+
+test {
+    useJUnitPlatform()
+}
+
+shadowJar {
+    archiveClassifier.set('all')
+    mergeServiceFiles()
+    manifest {
+        attributes(
+                'Main-Class': 'fr.freshperf.api.Main',
+                'Implementation-Version': version
+        )
+    }
+}
+
+tasks.build.dependsOn(tasks.shadowJar)
